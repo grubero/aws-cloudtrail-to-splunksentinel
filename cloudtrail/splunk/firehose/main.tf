@@ -15,6 +15,18 @@ resource "aws_cloudwatch_log_group" "cloudwatch_group_cloudtrail_sourced" {
   retention_in_days = 3
 }
 
+# CloudWatch log group to log Firehose streaming errors (optional)
+# Firehose sets a compulsary log group name as '/aws/kinesisfirehose/<firehose name>'
+resource "aws_cloudwatch_log_group" "cloudwatch_group_firehose_error" {
+  name            = "/aws/kinesisfirehose/${aws_kinesis_firehose_delivery_stream.splunk_stream.name}"
+  log_group_class = "STANDARD"
+  skip_destroy    = false
+  retention_in_days = 3
+  tags = {
+    Description = "Error logging for SplunkFirehoseStream"
+  }
+}
+
 /*
 Role policy for CloudTrail to stream to the "CloudTrail/logs" log group and then to Splunk via Firehose
 (https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-required-policy-for-cloudwatch-logs.html)
@@ -25,7 +37,7 @@ Subscription filter permissions: https://docs.aws.amazon.com/AmazonCloudWatch/la
 ### CloudTrail streaming to a CloudWatch Log group ###
 
 data "aws_iam_policy_document" "splunk_firehose_role_policy" {
-  # One role to cover CloudWatch logs, Lambda and Firehose 
+  # One role to cover CloudWatch logs, Lambda and Firehose
   # https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-required-policy-for-cloudwatch-logs.html
 
   statement {
@@ -48,7 +60,9 @@ data "aws_iam_policy_document" "splunk_firehose_role_policy" {
       "logs:DescribeLogStreams",
       "logs:DescribeLogGroups",
     ]
-    resources = ["arn:aws:logs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:log-group:${aws_cloudwatch_log_group.cloudwatch_group_cloudtrail_sourced.name}:log-stream:*"]
+    resources = [
+      "arn:aws:logs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:log-group:${aws_cloudwatch_log_group.cloudwatch_group_cloudtrail_sourced.name}:*",
+      "arn:aws:logs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:log-group:${aws_cloudwatch_log_group.cloudwatch_group_firehose_error.name}:*"]
   }
 
   statement {
@@ -248,8 +262,8 @@ resource "aws_kinesis_firehose_delivery_stream" "splunk_stream" {
         role_arn = aws_iam_role.splunk_firehose_role.arn
         bucket_arn = var.cloudtrail_bucket_arn
         error_output_prefix = "firehose_failed_deliveries/"
-        buffering_size = 2
-        buffering_interval = 60
+        buffering_size = 10
+        buffering_interval = 400
         compression_format = "GZIP"
     }
 
@@ -285,13 +299,14 @@ resource "aws_kinesis_firehose_delivery_stream" "splunk_stream" {
       }
     }
 
-    # CloudWatch error logging has to be enabled manually because of some bug causing Terraform to not create the log stream automatically.
-    # cloudwatch_logging_options { 
-    #   depends_on = [aws_cloudwatch_log_group.cloudwatch_group_cloudtrail_failed_deliveries]
-    #   enabled = "true"
-    #   log_group_name = "/aws/kinesisfirehose/SplunkFirehoseStream"
-    #   log_stream_name = "DestinationDelivery"
-    # }
+    # Log destination and processing errors (optional)
+    # If there is an API error saying "The specified log stream does not exist." then go to the console and manually
+    # disable then re-enable CloudWatch error logging for this stream.
+    cloudwatch_logging_options {
+      enabled = "true"
+      log_group_name = "/aws/kinesisfirehose/SplunkFirehoseStream"
+      log_stream_name = "DestinationDelivery"
+    }
   }
 }
 
